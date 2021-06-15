@@ -7,6 +7,8 @@
 
 -behaviour(supervisor).
 
+-include("com_def.hrl").
+
 -export([start_link/0]).
 
 -export([init/1]).
@@ -26,10 +28,11 @@ start_link() ->
 %%                  type => worker(),       % optional
 %%                  modules => modules()}   % optional
 init([]) ->
+    ?INFO("~p is starting----------------------------------", [?MODULE]),
     SupFlags = #{strategy => one_for_all,
                  intensity => 0,
                  period => 1},
-    ChildSpecs = [],
+    ChildSpecs = [?CHILD(connection, worker)],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

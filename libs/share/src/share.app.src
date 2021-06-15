@@ -1,14 +1,10 @@
-{application, chatroom,
- [{description, "An OTP application"},
+{application, share,
+ [{description, "An OTP library"},
   {vsn, "0.1.0"},
   {registered, []},
-  {mod, {chatroom_app, []}},
   {applications,
    [kernel,
-    stdlib,
-    share,
-    lager,
-    cowboy
+    stdlib
    ]},
   {env,[]},
   {modules, []},
