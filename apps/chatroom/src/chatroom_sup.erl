@@ -28,11 +28,11 @@ start_link() ->
 %%                  type => worker(),       % optional
 %%                  modules => modules()}   % optional
 init([]) ->
-    ?INFO("~p is starting----------------------------------", [?MODULE]),
-    SupFlags = #{strategy => one_for_all,
-                 intensity => 0,
-                 period => 1},
-    ChildSpecs = [?CHILD(connection, worker)],
-    {ok, {SupFlags, ChildSpecs}}.
+  ?INFO("~p is starting----------------------------------", [?MODULE]),
+  SupFlags = #{strategy => one_for_all,
+    intensity => 0,
+    period => 1},
+  ChildSpecs = [?CHILD(connection, worker)],
+  {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions
