@@ -18,3 +18,7 @@ _checkouts/
 
 # lager
 log/
+
+# bitcask
+client_db/
+chat_db/

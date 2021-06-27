@@ -11,6 +11,8 @@
 
 -record(state, {uname, ip, hb_cnt}).
 
+-define(PID_NAME_ETS, pid_name_ets).
+
 start_link() ->
   {ok, WsPort} = config:get(chatroom, port),
   ?INFO("roomchat port: ~p------------------", [WsPort]),
@@ -37,7 +39,7 @@ websocket_handle(NetMsg = {binary, Bin}, State) ->
   do_log_msg_(up, NetMsg, State),
   do_websocket_handle(binary_to_term(Bin), State);
 websocket_handle({text, <<"heart_beat">>}, State = #state{hb_cnt = HbCnt}) ->
-  {reply, "heart_beat", State#state{hb_cnt = HbCnt + 1}};
+  {reply, {text, "heart_beat"}, State#state{hb_cnt = HbCnt + 1}};
 websocket_handle(NetMsg, State) ->
   do_log_msg_(up, NetMsg, State),
   {reply, {fail, []}, State}.

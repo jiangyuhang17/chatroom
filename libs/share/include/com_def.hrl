@@ -12,6 +12,8 @@
 -define(WARNING(Arg),        catch lager:warning("~p", [Arg])).
 -define(ERROR(Arg),          catch lager:error("~p",   [Arg])).
 
+-define(NOW,  time_util:now()).
+
 %% supervisor
 -define(CHILD(I), {I, {I, start_link, []}, permanent, 5000, worker, [I]}).
 -define(CHILD(I, Type), {I, {I, start_link, []}, permanent, 5000, Type, [I]}).
