@@ -3,4 +3,6 @@
 
 -define(ERR_SYS_ENV_CONFIG_NOT_FOUND, err_sys_env_config_not_found).
 
+-define(ERR_UNEXPECTED_REQUEST, err_unexpected_request).
+
 -endif.
