@@ -11,6 +11,8 @@
 
 -record(state, {uname, ip, hb_cnt}).
 
+-record(chat, {id, uname, ts, content}).
+
 -define(PID_NAME_ETS, pid_name_ets).
 
 start_link() ->
@@ -44,18 +46,33 @@ websocket_handle(NetMsg, State) ->
   do_log_msg_(up, NetMsg, State),
   {reply, {fail, []}, State}.
 
-do_websocket_handle({login, {uname, UName}}, State) ->
-  {reply, {binary, term_to_binary({ok, login})}, State#state{uname = UName}};
+do_websocket_handle(Req = {login, UName}, State) ->
+  DnMsg = {binary, term_to_binary({ok, Req})},
+  do_log_msg_(down, DnMsg, State),
+  {reply, {binary, term_to_binary({ok, Req})}, State#state{uname = UName}};
+do_websocket_handle({content, Content}, State = #state{uname = UName}) ->
+  DBHandle = bitcask:open("chat_db", [read_write]),
+  ChatID   = case bitcask:get(DBHandle, <<"chat_id">>) of
+    not_found -> 1;
+    {ok, Bin} -> binary_to_integer(Bin) + 1
+  end,
+  Key   = "chat_"++ integer_to_list(ChatID),
+  Value = #chat{id = ChatID, uname = UName, ts = ?NOW, content = Content},
+  bitcask:put(DBHandle, list_to_binary(Key), term_to_binary(Value)),
+  bitcask:put(DBHandle, <<"chat_id">>, integer_to_binary(ChatID)),
+  bitcask:close(DBHandle),
+  DnMsg = {binary, term_to_binary({ok, {content, Value}})},
+  do_log_msg_(down, DnMsg, State),
+  {reply, DnMsg, State};
 do_websocket_handle(_, State) ->
-  {reply, {?ERR_UNEXPECTED_REQUEST}, State}.
+  DnMsg = {?ERR_UNEXPECTED_REQUEST},
+  do_log_msg_(down, DnMsg, State),
+  {reply, DnMsg, State}.
 
 websocket_info(NetMsg, State) ->
   do_log_msg_(info, NetMsg, State),
   {ok, State}.
 
-terminate(Reason, _Req, State) ->
-  %% TODO chatroom delete UName from ets about broadcast
-  terminate_(Reason, State);
 terminate(Reason, _Req, State) ->
   terminate_(Reason, State).
 

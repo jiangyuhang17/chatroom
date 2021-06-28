@@ -2,7 +2,10 @@
 
 -include("com_def.hrl").
 
--export([datetime/0]).
+-export([local_time/0, datetime/0]).
+
+local_time() ->
+  erlang:localtime().
 
 %% @spec "2021-5-29 22:24:36"
 datetime() ->

@@ -5,7 +5,7 @@
 -include("com_def.hrl").
 
 -export([start_link/0, stop/1]).
--export([create_or_login/1, get_pid/0]).
+-export([login/1, send/1, get_pid/0]).
 
 %% gen_server callbacks
 -export([
@@ -21,7 +21,7 @@
 -define(MSG_REPLY_TIME_OUT, 1000).
 -define(HEART_BEAT_INTERVAL, 5000). %% purge connection timer, 1 sec check once
 
--record(state, {ws_conn, m_ref, stream_ref, hb_cnt, uname, chat_id, db_handle}).
+-record(state, {ws_conn, m_ref, stream_ref, hb_cnt, uname, chat_id}).
 -record(chat, {id, uname, ts, content}).
 
 start_link() ->
@@ -33,9 +33,11 @@ start_link() ->
   erlang:send_after(?HEART_BEAT_INTERVAL, Pid, "heart_beat"),
   {ok, Pid}.
 
-create_or_login(UName) ->
-  Reply = gen_server:call(get_pid(), {create_or_login, UName}),
-  ?DEBUG("--------------create_or_login reply ~p", [Reply]).
+login(UName) ->
+  gen_server:call(get_pid(), {login, UName}).
+
+send(Content) ->
+  gen_server:call(get_pid(), {content, Content}).
 
 get_pid() ->
   [{pid, Pid}|_] = ets:lookup(?CONN_PID_ETS, pid),
@@ -47,12 +49,13 @@ init([Host, Port]) ->
   process_flag(trap_exit, true),
   DBHandle = bitcask:open("client_db", [read_write]),
   LocalID  = case bitcask:get(DBHandle, <<"local_id">>) of
-    non_found -> 0;
+    not_found -> 0;
     {ok, Bin} -> binary_to_term(Bin)
   end,
   show_local_record_(DBHandle, LocalID, 1),
+  bitcask:close(DBHandle),
   {WsConn, MRef, StreamRef} = ws_login_(Host, Port),
-  {ok, #state{ws_conn = WsConn, m_ref = MRef, stream_ref = StreamRef, hb_cnt = 0, uname = "anonymous", chat_id = LocalID, db_handle = DBHandle}}.
+  {ok, #state{ws_conn = WsConn, m_ref = MRef, stream_ref = StreamRef, hb_cnt = 0, uname = "anonymous", chat_id = LocalID}}.
 
 show_local_record_(DBHandle, LocalID, IterID) when LocalID >= IterID ->
   ChatID = "chat_"++ integer_to_list(IterID),
@@ -91,37 +94,46 @@ upgrade_success_(ConnPid, StreamRef) ->
   ?DEBUG("[~p][http -> websocket] success  self:~w, connect:~w, ref:~p ~n", [?MODULE, self(), ConnPid,  StreamRef]),
   {ok, ConnPid}.
 
-handle_call({create_or_login, UserName} = Msg, _From, State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
-  ok = gun:ws_send(ConnPid, {binary, term_to_binary({login, {uname, UserName}})}),  
+handle_call({login, _} = Msg, _From, State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
+  ok = gun:ws_send(ConnPid, {binary, term_to_binary(Msg)}),  
+  wait_receive_(Msg, ConnPid, MRef, State);
+handle_call({content, _} = Msg, _From, State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
+  ok = gun:ws_send(ConnPid, {binary, term_to_binary(Msg)}),  
   wait_receive_(Msg, ConnPid, MRef, State);
 handle_call(_Request, _From, State) ->
   ?DEBUG("[~p] ws_client handle_call,  msg:~p , from:~p, state:~p ~n", [?MODULE, _Request, _From, State]),
   {reply, ok, State}.
 
-wait_receive_(Msg, ConnPid, MRef, State = #state{hb_cnt = HbCnt, db_handle = DBHandle}) ->
+wait_receive_(Msg, ConnPid, MRef, State = #state{hb_cnt = HbCnt}) ->
   receive
     {gun_ws, _Pid, _StreamRef, {text, <<"heart_beat">>}} ->
       {noreply, State#state{hb_cnt = HbCnt + 1}};
     {gun_ws, _Pid, _StreamRef,  {binary, RecvData} = _Frame} ->
-      ?DEBUG("[~p] ok, recvdata:~p  ~n", [?MODULE, binary_to_term(RecvData)]),
-      {reply, {}, State};
+      do_reply_handle(binary_to_term(RecvData), State);
     {gun_down, Pid, ws, _, _, _} ->
-      close(Pid, MRef, DBHandle),
+      close(Pid, MRef),
       {reply, {fail, ""}, State};
     {'DOWN', MRef, process, Pid, normal} ->
-      close(Pid, MRef, DBHandle),
+      close(Pid, MRef),
       {reply, {fail, ""}, State};
     {gun_ws, _Pid, _StreamRef,  {close, RecvData} = _Frame} ->
       ?DEBUG("[~p] ws_client is closed, recvdata:~p  ~n", [?MODULE, RecvData]),
-      close(ConnPid, MRef, DBHandle);
+      close(ConnPid, MRef);
     Other ->
       ?ERROR("[~p:~p] Unexpected message ~p", [?MODULE, ?FUNCTION_NAME, Other]),
-      close(ConnPid, MRef, DBHandle),
+      close(ConnPid, MRef),
       {reply, {fail,""}, State}
   after ?MSG_REPLY_TIME_OUT ->
     ?ERROR("[~p] ws_client wait for response, msg:~p  ~n", [?MODULE, Msg]),
     {reply, {fail,""}, State}
   end.
+
+do_reply_handle({ok, {login, UName}}, State) ->
+  ?DEBUG("[~p] do_reply_handle login user name ~p ~n", [?MODULE, UName]),
+  {reply, {ok, login}, State#state{uname = UName}};
+do_reply_handle({ok, {content, Value}}, State) ->
+  ?DEBUG("[~p] do_reply_handle chat record ~p ~n", [?MODULE, Value]),
+  {reply, {ok, login}, State}.
 
 handle_cast(_Request, State) ->
   {noreply, State}.
@@ -133,20 +145,20 @@ handle_info("heart_beat", State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
   gun:ws_send(ConnPid, {text, "heart_beat"}),
   erlang:send_after(?HEART_BEAT_INTERVAL, self(), "heart_beat"),
   wait_receive_({text, "heart_beat"}, ConnPid, MRef, State);
-handle_info({'DOWN', MRef, process, Pid, normal}, State = #state{db_handle = DBHandle}) ->
+handle_info({'DOWN', MRef, process, Pid, normal}, State = #state{}) ->
   ?DEBUG("[~p:~p] ws_client handle_info,  down is called ~n", [?MODULE, ?LINE]),
-  close(Pid, MRef, DBHandle),
+  close(Pid, MRef),
   {noreply, State};
-handle_info(stop, #state{ws_conn = ConnPid, m_ref = MRef, db_handle = DBHandle}) ->
+handle_info(stop, #state{ws_conn = ConnPid, m_ref = MRef}) ->
   ?DEBUG("[~p:~p] ws_client handle_info,  stop is called ~n", [?MODULE, ?LINE]),
-  close(ConnPid, MRef, DBHandle),
+  close(ConnPid, MRef),
   exit(normal);
 handle_info(_Info, State) ->
   ?DEBUG("[~p:~p]  ws_client handle_info,  unexpect Msg:~p, ~n", [?MODULE, ?LINE, _Info]),
   {noreply, State}.
 
-terminate(Reason, State = #state{ws_conn = ConnPid, m_ref = MRef, db_handle = DBHandle}) ->
-  close(ConnPid, MRef, DBHandle),
+terminate(Reason, State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
+  close(ConnPid, MRef),
   ?DEBUG("[~p] is terminate, reason:~p, state:~p ------ self:~w ~n", [?MODULE, Reason, State, self()]),
   ok.
 
@@ -157,10 +169,8 @@ stop(WsPid) ->
   ?INFO("[~p], ws_client stop is called, ~p:~p ~n", [?MODULE, WsPid, self()]),
   WsPid ! stop.
 
-close(Pid, MRef, DBHandle) ->
+close(Pid, MRef) ->
   demonitor(MRef),
   gun:close(Pid),
   ?INFO("[~p], ws_client close is called, ~p:~p ~n", [?MODULE, self(), Pid]),
-  gun:flush(Pid),
-  bitcask:sync(DBHandle),
-  bitcask:close(DBHandle).
+  gun:flush(Pid).

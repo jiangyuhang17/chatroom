@@ -12,7 +12,7 @@
 -define(WARNING(Arg),        catch lager:warning("~p", [Arg])).
 -define(ERROR(Arg),          catch lager:error("~p",   [Arg])).
 
--define(NOW,  time_util:now()).
+-define(NOW, time_util:datetime()).
 
 %% supervisor
 -define(CHILD(I), {I, {I, start_link, []}, permanent, 5000, worker, [I]}).
