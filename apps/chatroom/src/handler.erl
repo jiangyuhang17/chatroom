@@ -13,8 +13,6 @@
 
 -record(chat, {id, uname, ts, content}).
 
--define(PID_NAME_ETS, pid_name_ets).
-
 start_link() ->
   {ok, WsPort} = config:get(chatroom, port),
   ?INFO("roomchat port: ~p------------------", [WsPort]),
@@ -40,8 +38,6 @@ websocket_init(State) ->
 websocket_handle(NetMsg = {binary, Bin}, State) ->
   do_log_msg_(up, NetMsg, State),
   do_websocket_handle(binary_to_term(Bin), State);
-websocket_handle({text, <<"heart_beat">>}, State = #state{hb_cnt = HbCnt}) ->
-  {reply, {text, "heart_beat"}, State#state{hb_cnt = HbCnt + 1}};
 websocket_handle(NetMsg, State) ->
   do_log_msg_(up, NetMsg, State),
   {reply, {fail, []}, State}.
@@ -51,23 +47,46 @@ do_websocket_handle(Req = {login, UName}, State) ->
   do_log_msg_(down, DnMsg, State),
   {reply, {binary, term_to_binary({ok, Req})}, State#state{uname = UName}};
 do_websocket_handle({content, Content}, State = #state{uname = UName}) ->
+  NChatID = get_chat_id_() + 1,
+  Key   = "chat_" ++ integer_to_list(NChatID),
+  Value = #chat{id = NChatID, uname = UName, ts = ?NOW, content = Content},
   DBHandle = bitcask:open("chat_db", [read_write]),
-  ChatID   = case bitcask:get(DBHandle, <<"chat_id">>) of
-    not_found -> 1;
-    {ok, Bin} -> binary_to_integer(Bin) + 1
-  end,
-  Key   = "chat_"++ integer_to_list(ChatID),
-  Value = #chat{id = ChatID, uname = UName, ts = ?NOW, content = Content},
   bitcask:put(DBHandle, list_to_binary(Key), term_to_binary(Value)),
-  bitcask:put(DBHandle, <<"chat_id">>, integer_to_binary(ChatID)),
+  bitcask:put(DBHandle, <<"chat_id">>, integer_to_binary(NChatID)),
   bitcask:close(DBHandle),
   DnMsg = {binary, term_to_binary({ok, {content, Value}})},
   do_log_msg_(down, DnMsg, State),
   {reply, DnMsg, State};
+do_websocket_handle({get, ID}, State = #state{hb_cnt = HbCnt}) ->
+  ChatID  = get_chat_id_(),
+  Records = get_record_from_bitcask_(ID, ChatID, []),
+  {reply, {binary, term_to_binary({ok, {get, ChatID, Records}})}, State#state{hb_cnt = HbCnt + 1}};
 do_websocket_handle(_, State) ->
   DnMsg = {?ERR_UNEXPECTED_REQUEST},
   do_log_msg_(down, DnMsg, State),
   {reply, DnMsg, State}.
+
+get_record_from_bitcask_(ID, ChatID, ACC) when ChatID > ID ->
+  DBHandle = bitcask:open("chat_db", [read_write]),
+  Key      = "chat_" ++ integer_to_list(ChatID),
+  NACC     = case bitcask:get(DBHandle, list_to_binary(Key)) of
+    not_found -> ACC;
+    {ok, Bin} -> 
+      [binary_to_term(Bin) | ACC]
+  end,
+  bitcask:close(DBHandle),
+  get_record_from_bitcask_(ID, ChatID - 1, NACC);
+get_record_from_bitcask_(_, _, ACC) ->
+  ACC.
+
+get_chat_id_() ->
+  DBHandle = bitcask:open("chat_db", [read_write]),
+  ChatID   = case bitcask:get(DBHandle, <<"chat_id">>) of
+    not_found -> 0;
+    {ok, Bin} -> binary_to_integer(Bin)
+  end,
+  bitcask:close(DBHandle),
+  ChatID.
 
 websocket_info(NetMsg, State) ->
   do_log_msg_(info, NetMsg, State),

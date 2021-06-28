@@ -4,6 +4,8 @@
 
 -include("com_def.hrl").
 
+-include("err_code.hrl").
+
 -export([start_link/0, stop/1]).
 -export([login/1, send/1, get_pid/0]).
 
@@ -19,9 +21,9 @@
 
 -define(CONN_PID_ETS, conn_pid_ets).
 -define(MSG_REPLY_TIME_OUT, 1000).
--define(HEART_BEAT_INTERVAL, 5000). %% purge connection timer, 1 sec check once
+-define(HEART_BEAT_INTERVAL, 10000). %% purge connection timer, 1 sec check once
 
--record(state, {ws_conn, m_ref, stream_ref, hb_cnt, uname, chat_id}).
+-record(state, {ws_conn, m_ref, stream_ref, hb_cnt, uname}).
 -record(chat, {id, uname, ts, content}).
 
 start_link() ->
@@ -47,25 +49,33 @@ get_pid() ->
 
 init([Host, Port]) ->
   process_flag(trap_exit, true),
+  LocalID  = get_local_id_(),
+  show_local_record_(LocalID, 1),
+  {WsConn, MRef, StreamRef} = ws_login_(Host, Port),
+  {ok, #state{ws_conn = WsConn, m_ref = MRef, stream_ref = StreamRef, hb_cnt = 0, uname = "anonymous"}}.
+
+get_local_id_() ->
   DBHandle = bitcask:open("client_db", [read_write]),
   LocalID  = case bitcask:get(DBHandle, <<"local_id">>) of
     not_found -> 0;
-    {ok, Bin} -> binary_to_term(Bin)
+    {ok, Bin} -> binary_to_integer(Bin)
   end,
-  show_local_record_(DBHandle, LocalID, 1),
   bitcask:close(DBHandle),
-  {WsConn, MRef, StreamRef} = ws_login_(Host, Port),
-  {ok, #state{ws_conn = WsConn, m_ref = MRef, stream_ref = StreamRef, hb_cnt = 0, uname = "anonymous", chat_id = LocalID}}.
+  LocalID.
 
-show_local_record_(DBHandle, LocalID, IterID) when LocalID >= IterID ->
+show_local_record_(LocalID, IterID) when LocalID >= IterID ->
+  DBHandle = bitcask:open("client_db", [read_write]),
   ChatID = "chat_"++ integer_to_list(IterID),
-  case bitcask:get(DBHandle, <<ChatID>>) of
-    non_found -> show_local_record_(DBHandle, LocalID, IterID + 1);
+  case bitcask:get(DBHandle, list_to_binary(ChatID)) of
+    non_found -> 
+      ok;
     {ok, Bin} ->
       #chat{id = IterID, uname = N, ts = T, content = C} = binary_to_term(Bin),
-      io:format("~n~p ~p~n~p~n", [N, T, C])
-  end;
-show_local_record_(_, _, _) ->
+      io:format("~n~p ~p ~p~n", [N, T, C])
+  end,
+  bitcask:close(DBHandle),
+  show_local_record_(LocalID, IterID + 1);
+show_local_record_(_, _) ->
   ok.
 
 ws_login_(Host, Port) ->
@@ -104,10 +114,8 @@ handle_call(_Request, _From, State) ->
   ?DEBUG("[~p] ws_client handle_call,  msg:~p , from:~p, state:~p ~n", [?MODULE, _Request, _From, State]),
   {reply, ok, State}.
 
-wait_receive_(Msg, ConnPid, MRef, State = #state{hb_cnt = HbCnt}) ->
+wait_receive_(Msg, ConnPid, MRef, State) ->
   receive
-    {gun_ws, _Pid, _StreamRef, {text, <<"heart_beat">>}} ->
-      {noreply, State#state{hb_cnt = HbCnt + 1}};
     {gun_ws, _Pid, _StreamRef,  {binary, RecvData} = _Frame} ->
       do_reply_handle(binary_to_term(RecvData), State);
     {gun_down, Pid, ws, _, _, _} ->
@@ -133,7 +141,20 @@ do_reply_handle({ok, {login, UName}}, State) ->
   {reply, {ok, login}, State#state{uname = UName}};
 do_reply_handle({ok, {content, Value}}, State) ->
   ?DEBUG("[~p] do_reply_handle chat record ~p ~n", [?MODULE, Value]),
-  {reply, {ok, login}, State}.
+  {reply, {ok, content}, State};
+do_reply_handle({ok, {get, ChatID, Records}}, State = #state{hb_cnt = HbCnt}) ->
+  DBHandle = bitcask:open("client_db", [read_write]),
+  bitcask:put(DBHandle, <<"local_id">>, integer_to_binary(ChatID)),
+  lists:foreach(fun(R = #chat{id = ID, uname = N, ts = T, content = C}) -> 
+                io:format("~n~p ~p ~p~n", [N, T, C]),
+                Key = "chat_" ++ integer_to_list(ID),
+                bitcask:put(DBHandle, list_to_binary(Key), term_to_binary(R))
+              end, Records),
+  bitcask:close(DBHandle),
+  {noreply, State#state{hb_cnt = HbCnt + 1}};
+do_reply_handle(_, State) ->
+  ?DEBUG("[~p] do_reply_handle unexpected request ~n"),
+  {reply, {fail, ?ERR_UNEXPECTED_REQUEST}, State}.
 
 handle_cast(_Request, State) ->
   {noreply, State}.
@@ -142,9 +163,10 @@ handle_info({gun_ws, Pid, _StreamRef, close}, State) ->
   gun:ws_send(Pid, close),
   {noreply, State};
 handle_info("heart_beat", State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
-  gun:ws_send(ConnPid, {text, "heart_beat"}),
+  LocalID = get_local_id_(),
+  gun:ws_send(ConnPid, {binary, term_to_binary({get, LocalID})}),
   erlang:send_after(?HEART_BEAT_INTERVAL, self(), "heart_beat"),
-  wait_receive_({text, "heart_beat"}, ConnPid, MRef, State);
+  wait_receive_({get, LocalID}, ConnPid, MRef, State);
 handle_info({'DOWN', MRef, process, Pid, normal}, State = #state{}) ->
   ?DEBUG("[~p:~p] ws_client handle_info,  down is called ~n", [?MODULE, ?LINE]),
   close(Pid, MRef),
