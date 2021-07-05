@@ -41,6 +41,9 @@ websocket_init(State) ->
 websocket_handle(NetMsg = {binary, Bin}, State) ->
   do_log_msg_(up, NetMsg, State),
   do_websocket_handle_(binary_to_term(Bin), State);
+websocket_handle(NetMsg = {text, <<"heart_beat">>}, State = #state{hb_cnt = HbCnt}) ->
+  do_log_msg_(up, NetMsg, State),
+  {reply, {text, "heart_beat"}, State#state{hb_cnt = HbCnt + 1}};
 websocket_handle(NetMsg, State) ->
   do_log_msg_(up, NetMsg, State),
   {reply, {fail, []}, State}.
@@ -68,27 +71,51 @@ terminate(Reason, _Req, State = #state{uname = UName}) ->
 
 %% internal functions
 
-do_websocket_handle_(Req = {login, UName}, State) ->
-  DnMsg = {binary, term_to_binary({ok, Req})},
-  do_log_msg_(down, DnMsg, State),
-  {reply, {binary, term_to_binary({ok, Req})}, State#state{uname = UName}};
+do_websocket_handle_({signup, {UName, Token, LocalID}}, State) ->
+  case kv_util:get(?SERVER_DB, "UName_" ++ UName) of
+    not_found ->
+      kv_util:set(?SERVER_DB, "UName_" ++ UName, Token),
+      ChatID  = get_chat_id_(),
+      Records = get_record_from_bitcask_(LocalID, ChatID, []),
+      DnMsg = {ok, {signup, UName, ChatID, Records}},
+      do_log_msg_(down, DnMsg, State),
+      {reply, {binary, term_to_binary(DnMsg)}, State#state{uname = UName}};
+    _         ->
+      DnMsg = {fail, ?ERR_USER_ALREADY_EXIST},
+      do_log_msg_(down, DnMsg, State),
+      {reply, {binary, term_to_binary(DnMsg)}, State}
+  end;
+do_websocket_handle_({signin, {UName, Token, LocalID}}, State) ->
+  Bin = term_to_binary(Token),
+  case kv_util:get(?SERVER_DB, "UName_" ++ UName) of
+    not_found ->
+      DnMsg = {fail, ?ERR_USER_NOT_EXIST},
+      do_log_msg_(down, DnMsg, State),
+      {reply, {binary, term_to_binary(DnMsg)}, State};
+    {ok, Bin} ->
+      ChatID  = get_chat_id_(),
+      Records = get_record_from_bitcask_(LocalID, ChatID, []),
+      DnMsg = {ok, {signin, UName, ChatID, Records}},
+      do_log_msg_(down, DnMsg, State),
+      {reply, {binary, term_to_binary(DnMsg)}, State#state{uname = UName}};
+    _ ->
+      DnMsg = {fail, ?ERR_WRONG_TOKEN},
+      do_log_msg_(down, DnMsg, State),
+      {reply, {binary, term_to_binary(DnMsg)}, State}
+  end;
 do_websocket_handle_({content, Content}, State = #state{uname = UName}) ->
   NChatID = get_chat_id_() + 1,
   Key   = "chat_" ++ integer_to_list(NChatID),
   Value = #chat{id = NChatID, uname = UName, ts = ?NOW, content = Content},
   kv_util:set(?SERVER_DB, Key, Value),
   kv_util:set(?SERVER_DB, ?CHAT_ID, NChatID),
-  DnMsg = {binary, term_to_binary({ok, {content, Value}})},
+  DnMsg = {ok, {content, Value}},
   do_log_msg_(down, DnMsg, State),
-  {reply, DnMsg, State};
-do_websocket_handle_({get, ID}, State = #state{hb_cnt = HbCnt}) ->
-  ChatID  = get_chat_id_(),
-  Records = get_record_from_bitcask_(ID, ChatID, []),
-  {reply, {binary, term_to_binary({ok, {get, ChatID, Records}})}, State#state{hb_cnt = HbCnt + 1}};
+  {reply, {binary, term_to_binary(DnMsg)}, State};
 do_websocket_handle_(_, State) ->
-  DnMsg = {?ERR_UNEXPECTED_REQUEST},
+  DnMsg = {fail, ?ERR_UNEXPECTED_REQUEST},
   do_log_msg_(down, DnMsg, State),
-  {reply, DnMsg, State}.
+  {reply, {binary, term_to_binary(DnMsg)}, State}.
 
 get_record_from_bitcask_(ID, ChatID, ACC) when ChatID > ID ->
   Key   = ?CHAT_PRE ++ integer_to_list(ChatID),

@@ -9,7 +9,7 @@
 -export([start_link/0, stop/1]).
 
 %% client api
--export([login/1, send/1, get_pid/0]).
+-export([signup/2, signin/2, send/1, get_pid/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -19,7 +19,7 @@
 -define(LOCAL_ID, local_id).
 -define(CHAT_PRE, "chat_").
 -define(MSG_REPLY_TIME_OUT, 1000).
--define(HEART_BEAT_INTERVAL, 1000).
+-define(HEART_BEAT_INTERVAL, 5000).
 
 -record(state, {ws_conn, m_ref, stream_ref, hb_cnt, uname}).
 -record(chat, {id, uname, ts, content}).
@@ -39,8 +39,13 @@ stop(WsPid) ->
 
 %% client api
 
-login(UName) ->
-  gen_server:call(get_pid(), {login, UName}).
+signup(UName, Token) ->
+  LocalID = get_local_id_(),
+  gen_server:call(get_pid(), {signup, {UName, Token, LocalID}}).
+
+signin(UName, Token) ->
+  LocalID = get_local_id_(),
+  gen_server:call(get_pid(), {signin, {UName, Token, LocalID}}).
 
 send(Content) ->
   gen_server:call(get_pid(), {content, Content}).
@@ -53,15 +58,11 @@ get_pid() ->
 
 init([Host, Port]) ->
   process_flag(trap_exit, true),
-  LocalID  = get_local_id_(),
-  show_local_record_(LocalID, 1),
   {WsConn, MRef, StreamRef} = ws_login_(Host, Port),
   {ok, #state{ws_conn = WsConn, m_ref = MRef, stream_ref = StreamRef, hb_cnt = 0, uname = "anonymous"}}.
 
-handle_call({login, _} = Msg, _From, State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
-  ok = gun:ws_send(ConnPid, {binary, term_to_binary(Msg)}),  
-  wait_receive_(Msg, ConnPid, MRef, State);
-handle_call({content, _} = Msg, _From, State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
+handle_call({Cmd, _} = Msg, _From, State = #state{ws_conn = ConnPid, m_ref = MRef}) 
+  when Cmd =:= signup orelse Cmd =:= signin orelse Cmd =:= content ->
   ok = gun:ws_send(ConnPid, {binary, term_to_binary(Msg)}),  
   wait_receive_(Msg, ConnPid, MRef, State);
 handle_call(_Request, _From, State) ->
@@ -75,10 +76,9 @@ handle_info({gun_ws, Pid, _StreamRef, close}, State) ->
   gun:ws_send(Pid, close),
   {noreply, State};
 handle_info("heart_beat", State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
-  LocalID = get_local_id_(),
-  gun:ws_send(ConnPid, {binary, term_to_binary({get, LocalID})}),
+  gun:ws_send(ConnPid, {text, "heart_beat"}),
   erlang:send_after(?HEART_BEAT_INTERVAL, self(), "heart_beat"),
-  wait_receive_({get, LocalID}, ConnPid, MRef, State);
+  wait_receive_({text, "heart_beat"}, ConnPid, MRef, State);
 handle_info({'DOWN', MRef, process, Pid, normal}, State = #state{}) ->
   ?DEBUG("[~p:~p] ws_client handle_info,  down is called ~n", [?MODULE, ?LINE]),
   close_(Pid, MRef),
@@ -149,6 +149,8 @@ wait_receive_(Msg, ConnPid, MRef, State) ->
   receive
     {gun_ws, _Pid, _StreamRef,  {binary, RecvData} = _Frame} ->
       do_reply_handle_(binary_to_term(RecvData), State);
+    {gun_ws, _Pid, _StreamRef,  {text, <<"heart_beat">>} = _Frame} ->
+      {noreply, State#state{hb_cnt = State#state.hb_cnt + 1}};
     {gun_down, Pid, ws, _, _, _} ->
       close_(Pid, MRef),
       {reply, {fail, ""}, State};
@@ -167,23 +169,32 @@ wait_receive_(Msg, ConnPid, MRef, State) ->
     {reply, {fail,""}, State}
   end.
 
-do_reply_handle_({ok, {login, UName}}, State) ->
+do_reply_handle_({ok, {Op, UName, ChatID, Records}}, State) when Op =:= signup orelse Op =:= signin ->
   ?DEBUG("[~p] do_reply_handle_ login user name ~p ~n", [?MODULE, UName]),
-  {reply, {ok, login}, State#state{uname = UName}};
-do_reply_handle_({ok, {content, Value}}, State) ->
-  ?DEBUG("[~p] do_reply_handle_ chat record ~p ~n", [?MODULE, Value]),
-  {reply, {ok, content}, State};
-do_reply_handle_({ok, {get, ChatID, Records}}, State = #state{hb_cnt = HbCnt}) ->
+  LocalID  = get_local_id_(),
+  show_local_record_(LocalID, 1),
   kv_util:set(?CLIENT_DB, ?LOCAL_ID, ChatID),
   lists:foreach(fun(R = #chat{id = ID, uname = N, ts = T, content = C}) -> 
                 io:format("~n~p ~p ~p~n", [N, T, C]),
                 Key = ?CHAT_PRE ++ integer_to_list(ID),
                 kv_util:set(?CLIENT_DB, Key, R)
               end, Records),
-  {noreply, State#state{hb_cnt = HbCnt + 1}};
+  {reply, {ok, Op}, State#state{uname = UName}};
+do_reply_handle_({fail, ?ERR_USER_ALREADY_EXIST}, State) ->
+  ?ERROR("[~p] do_reply_handle_ fail ~p ~n", [?MODULE, ?ERR_USER_ALREADY_EXIST]),
+  {reply, {fail, ?ERR_USER_ALREADY_EXIST}, State};
+do_reply_handle_({fail, ?ERR_USER_NOT_EXIST}, State) ->
+  ?ERROR("[~p] do_reply_handle_ fail ~p ~n", [?MODULE, ?ERR_USER_NOT_EXIST]),
+  {reply, {fail, ?ERR_USER_NOT_EXIST}, State};
+do_reply_handle_({fail, ?ERR_WRONG_TOKEN}, State) ->
+  ?ERROR("[~p] do_reply_handle_ fail ~p ~n", [?MODULE, ?ERR_WRONG_TOKEN]),
+  {reply, {fail, ?ERR_WRONG_TOKEN}, State};
+do_reply_handle_({ok, {content, Value}}, State) ->
+  ?DEBUG("[~p] do_reply_handle_ chat record ~p ~n", [?MODULE, Value]),
+  {reply, {ok, content}, State};
 do_reply_handle_(_, State) ->
-  ?DEBUG("[~p] do_reply_handle_ unexpected request ~n"),
-  {reply, {fail, ?ERR_UNEXPECTED_REQUEST}, State}.
+  ?DEBUG("[~p] do_reply_handle_ unexpected reply ~p ~n", [?MODULE, ?ERR_UNEXPECTED_REPLY]),
+  {reply, {fail, ?ERR_UNEXPECTED_REPLY}, State}.
 
 close_(Pid, MRef) ->
   demonitor(MRef),
