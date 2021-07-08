@@ -21,4 +21,7 @@
 -define(CHILD(N, I, Args, Type), {N, {I, start_link, Args}, permanent, 5000, Type, [I]}).
 -define(V_CHILD(Mod, Name), {Name, {Mod, start_link, [Name]}, permanent, 5000, worker, [Mod]}).
 
+%% record
+-record(chat, {id, uname, ts, content}).
+
 -endif.

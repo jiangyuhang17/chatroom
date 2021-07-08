@@ -9,14 +9,16 @@
 
 -export([websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 
+-define(CLIENT_PID_ETS, client_pid_ets).
 -define(SERVER_DB, "chat_db").
 -define(CHAT_ID, chat_id).
 -define(CHAT_PRE, "chat_").
 
 -record(state, {uname, ip, hb_cnt}).
--record(chat, {id, uname, ts, content}).
+-record(client, {uname, pid}).
 
 start_link() ->
+  ets:new(?CLIENT_PID_ETS, [set, public, {keypos, #client.uname}, named_table]),
   {ok, WsPort} = config:get(chatroom, port),
   ?INFO("roomchat port: ~p------------------", [WsPort]),
   Dispatch     = cowboy_router:compile([
@@ -48,6 +50,9 @@ websocket_handle(NetMsg, State) ->
   do_log_msg_(up, NetMsg, State),
   {reply, {fail, []}, State}.
 
+websocket_info({text, "another login"} = NetMsg, State) ->
+  do_log_msg_(info, NetMsg, State),
+  {reply, {text, "another login"}, State};
 websocket_info(NetMsg, State) ->
   do_log_msg_(info, NetMsg, State),
   {ok, State}.
@@ -67,6 +72,7 @@ terminate(Reason, _Req, State = #state{uname = UName}) ->
       %% 其他错误
       ?INFO("[~p]~p UName:~p, websocket closed unexpectedly (reason:~p), state:~p", [?MODULE, self(), UName, Error, State])
   end,
+  ets:delete(?CLIENT_PID_ETS, UName),
   ok.
 
 %% internal functions
@@ -75,6 +81,7 @@ do_websocket_handle_({signup, {UName, Token, LocalID}}, State) ->
   case kv_util:get(?SERVER_DB, "UName_" ++ UName) of
     not_found ->
       kv_util:set(?SERVER_DB, "UName_" ++ UName, Token),
+      ets:insert(?CLIENT_PID_ETS, #client{uname = UName, pid = self()}),
       ChatID  = get_chat_id_(),
       Records = get_record_from_bitcask_(LocalID, ChatID, []),
       DnMsg = {ok, {signup, UName, ChatID, Records}},
@@ -93,6 +100,12 @@ do_websocket_handle_({signin, {UName, Token, LocalID}}, State) ->
       do_log_msg_(down, DnMsg, State),
       {reply, {binary, term_to_binary(DnMsg)}, State};
     {ok, Bin} ->
+      case ets:lookup(?CLIENT_PID_ETS, UName) of
+        [] -> ok;
+        [#client{pid = Pid}] ->
+          Pid ! {text, "another login"}
+      end,
+      ets:insert(?CLIENT_PID_ETS, #client{uname = UName, pid = self()}),
       ChatID  = get_chat_id_(),
       Records = get_record_from_bitcask_(LocalID, ChatID, []),
       DnMsg = {ok, {signin, UName, ChatID, Records}},
@@ -109,6 +122,7 @@ do_websocket_handle_({content, Content}, State = #state{uname = UName}) ->
   Value = #chat{id = NChatID, uname = UName, ts = ?NOW, content = Content},
   kv_util:set(?SERVER_DB, Key, Value),
   kv_util:set(?SERVER_DB, ?CHAT_ID, NChatID),
+  ?INFO("-----------send broadcast---------------"),
   DnMsg = {ok, {content, Value}},
   do_log_msg_(down, DnMsg, State),
   {reply, {binary, term_to_binary(DnMsg)}, State};
@@ -134,7 +148,7 @@ get_chat_id_() ->
   end.
 
 do_log_msg_(up, {binary, Bin}, State) ->
-    ?DEBUG("[~p] ~p UP NetMsg={binary, ~p} State=~p", [?MODULE, self(), binary_to_term(Bin), State]);
+  ?DEBUG("[~p] ~p UP NetMsg={binary, ~p} State=~p", [?MODULE, self(), binary_to_term(Bin), State]);
 do_log_msg_(up, NetMsg, State) ->
   ?DEBUG("[~p] ~p UP NetMsg=~p State=~p", [?MODULE, self(), NetMsg, State]);
 do_log_msg_(down, NetMsg, State) ->

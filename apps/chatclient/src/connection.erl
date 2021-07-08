@@ -22,7 +22,6 @@
 -define(HEART_BEAT_INTERVAL, 5000).
 
 -record(state, {ws_conn, m_ref, stream_ref, hb_cnt, uname}).
--record(chat, {id, uname, ts, content}).
 
 start_link() ->
   {ok, Host} = config:get(chatroom, host),
@@ -75,6 +74,10 @@ handle_cast(_Request, State) ->
 handle_info({gun_ws, Pid, _StreamRef, close}, State) ->
   gun:ws_send(Pid, close),
   {noreply, State};
+handle_info({gun_ws, _Pid, _StreamRef, {text, <<"another login">>}}, #state{ws_conn = ConnPid, m_ref = MRef}) ->
+  ?DEBUG("[~p:~p] ws_client handle_info, another login, close this connection~n", [?MODULE, ?LINE]),
+  close_(ConnPid, MRef),
+  exit(normal);
 handle_info("heart_beat", State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
   gun:ws_send(ConnPid, {text, "heart_beat"}),
   erlang:send_after(?HEART_BEAT_INTERVAL, self(), "heart_beat"),

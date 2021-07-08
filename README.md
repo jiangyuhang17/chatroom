@@ -16,10 +16,16 @@
 ./rebar3 shell --apps chatroom
 ```
 
-设置名称
+注册账号
 
 ``` erlang
-connection:login(UserName) %% UserName为字符串类型
+connection:signup(UserName, Token) %% UserName为字符串类型
+```
+
+登录账号
+
+``` erlang
+connection:signin(UserName, Token) %% UserName为字符串类型
 ```
 
 发送聊天
