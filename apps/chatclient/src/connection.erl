@@ -78,6 +78,8 @@ handle_info({gun_ws, _Pid, _StreamRef, {text, <<"another login">>}}, #state{ws_c
   ?DEBUG("[~p:~p] ws_client handle_info, another login, close this connection~n", [?MODULE, ?LINE]),
   close_(ConnPid, MRef),
   exit(normal);
+handle_info({gun_ws, _Pid, _StreamRef, {binary, RecvData}}, State) ->
+   do_reply_handle_(binary_to_term(RecvData), State);
 handle_info("heart_beat", State = #state{ws_conn = ConnPid, m_ref = MRef}) ->
   gun:ws_send(ConnPid, {text, "heart_beat"}),
   erlang:send_after(?HEART_BEAT_INTERVAL, self(), "heart_beat"),
@@ -183,6 +185,22 @@ do_reply_handle_({ok, {Op, UName, ChatID, Records}}, State) when Op =:= signup o
                 kv_util:set(?CLIENT_DB, Key, R)
               end, Records),
   {reply, {ok, Op}, State#state{uname = UName}};
+do_reply_handle_({ok, {content, Num}}, State) ->
+  ?INFO("[~p] do_reply_handle_ chat record broadcast to ~p clients ~n", [?MODULE, Num]),
+  {reply, {ok, content}, State};
+do_reply_handle_({ok, {broadcast, #chat{id = ID, uname = N, ts = T, content = C} = Record}}, State) ->
+  ?INFO("[~p] do_reply_handle_ chat record broadcast ~p ~n", [?MODULE, Record]),
+  LocalID = get_local_id_(),
+  if 
+    LocalID < ID  ->
+    kv_util:set(?CLIENT_DB, ?LOCAL_ID, ID);
+    true ->
+      ok
+  end,
+  Key = ?CHAT_PRE ++ integer_to_list(ID),
+  kv_util:set(?CLIENT_DB, Key, Record),
+  io:format("~n~p ~p ~p~n", [N, T, C]),
+  {noreply, State};
 do_reply_handle_({fail, ?ERR_USER_ALREADY_EXIST}, State) ->
   ?ERROR("[~p] do_reply_handle_ fail ~p ~n", [?MODULE, ?ERR_USER_ALREADY_EXIST]),
   {reply, {fail, ?ERR_USER_ALREADY_EXIST}, State};
@@ -192,9 +210,6 @@ do_reply_handle_({fail, ?ERR_USER_NOT_EXIST}, State) ->
 do_reply_handle_({fail, ?ERR_WRONG_TOKEN}, State) ->
   ?ERROR("[~p] do_reply_handle_ fail ~p ~n", [?MODULE, ?ERR_WRONG_TOKEN]),
   {reply, {fail, ?ERR_WRONG_TOKEN}, State};
-do_reply_handle_({ok, {content, Value}}, State) ->
-  ?DEBUG("[~p] do_reply_handle_ chat record ~p ~n", [?MODULE, Value]),
-  {reply, {ok, content}, State};
 do_reply_handle_(_, State) ->
   ?DEBUG("[~p] do_reply_handle_ unexpected reply ~p ~n", [?MODULE, ?ERR_UNEXPECTED_REPLY]),
   {reply, {fail, ?ERR_UNEXPECTED_REPLY}, State}.

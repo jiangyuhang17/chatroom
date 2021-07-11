@@ -53,6 +53,9 @@ websocket_handle(NetMsg, State) ->
 websocket_info({text, "another login"} = NetMsg, State) ->
   do_log_msg_(info, NetMsg, State),
   {reply, {text, "another login"}, State};
+websocket_info({binary, DnMsg} = NetMsg, State) ->
+  do_log_msg_(info, NetMsg, State),
+  {reply, {binary, DnMsg}, State};
 websocket_info(NetMsg, State) ->
   do_log_msg_(info, NetMsg, State),
   {ok, State}.
@@ -122,10 +125,13 @@ do_websocket_handle_({content, Content}, State = #state{uname = UName}) ->
   Value = #chat{id = NChatID, uname = UName, ts = ?NOW, content = Content},
   kv_util:set(?SERVER_DB, Key, Value),
   kv_util:set(?SERVER_DB, ?CHAT_ID, NChatID),
-  ?INFO("-----------send broadcast---------------"),
-  DnMsg = {ok, {content, Value}},
+  DnMsg = {ok, {broadcast, Value}},
   do_log_msg_(down, DnMsg, State),
-  {reply, {binary, term_to_binary(DnMsg)}, State};
+  Acc = ets:foldl(fun(#client{pid = Pid}, Acc) ->
+                    Pid ! {binary, term_to_binary(DnMsg)},
+                    Acc + 1
+                  end, 0, ?CLIENT_PID_ETS),
+  {reply, {binary, term_to_binary({ok, {content, Acc}})}, State};
 do_websocket_handle_(_, State) ->
   DnMsg = {fail, ?ERR_UNEXPECTED_REQUEST},
   do_log_msg_(down, DnMsg, State),
